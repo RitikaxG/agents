@@ -131,9 +131,9 @@ it. The person's answer continues that task: the delegate sends it with the
 task's `taskId`, and the expert's own model reads it, answer or not. The
 pieces the expert flagged `livekit/verbatim` before its question reach the
 person as written, and the rest is the front desk's to word. The delegate's tool returns the
-question as `InputRequired(question, tool=)` naming itself, so the front
-desk asks it in its own words, or as written when the expert flagged it
-`livekit/verbatim`, and what the person says next is sent to the expert as the
+question as an `InputRequired`, so the front desk asks it in its own words,
+or as written when the expert flagged it `livekit/verbatim`, and the tool
+relays the answer: what the person says next is sent to the expert as the
 tool's next request, as they said it, with no model turn in between: on a
 call the framework runs the tool on the turn's transcript, in text on the
 next message, on whichever worker gets it ([tools.md](tools.md)). A

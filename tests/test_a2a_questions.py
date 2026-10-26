@@ -488,10 +488,6 @@ async def test_a_verbatim_result_before_an_experts_question_reaches_the_person_a
 
 
 @pytest.mark.rule("R45", "B19")
-@pytest.mark.xfail(
-    strict=True,
-    reason="B19: a text run returns at the first asking call, so the next call of the step never runs",
-)
 async def test_the_questions_of_one_step_are_one_and_the_model_reads_the_answer(
     door: Callable[..., Door],
 ) -> None:
@@ -517,7 +513,6 @@ async def test_the_questions_of_one_step_are_one_and_the_model_reads_the_answer(
 
 
 @pytest.mark.rule("R45")
-@pytest.mark.xfail(strict=True, reason="R45: the step's second question is never asked")
 async def test_different_questions_of_one_step_are_asked_in_order_and_exact_only_if_all_are(
     door: Callable[..., Door],
 ) -> None:
@@ -542,10 +537,6 @@ async def test_different_questions_of_one_step_are_asked_in_order_and_exact_only
 
 
 @pytest.mark.rule("R53", "B20")
-@pytest.mark.xfail(
-    strict=True,
-    reason="B20: another task's message answers the read-back, and its repeat is granted",
-)
 async def test_a_read_back_is_answered_only_by_a_message_of_its_task(
     door: Callable[..., Door],
 ) -> None:
@@ -582,9 +573,6 @@ async def test_a_read_back_is_answered_only_by_a_message_of_its_task(
 
 
 @pytest.mark.rule("R54")
-@pytest.mark.xfail(
-    strict=True, reason="R54: a continued task's model reads the other open task's items"
-)
 async def test_a_continued_task_does_not_read_what_other_open_tasks_added(
     door: Callable[..., Door],
 ) -> None:

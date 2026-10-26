@@ -221,17 +221,17 @@ class Rejected:
 
 @dataclass(frozen=True)
 class InputRequired:
-    """The turn or task waits on the person for an answer to ``question``.
+    """The turn or task waits on the person for an answer to ``question``, with no timeout.
 
+    Only for an input a tool needs to go on: an email, a yes or no on a read-back, a card
+    number. A conversational question is a plain reply, and the next message is a new request.
     The agent facing the person asks it in its own words, or exactly as written with
-    ``verbatim=True``. The answer continues the waiting task as the person's next message;
-    from a conversation tool the call keeps the question as its output. ``tool`` names the tool
-    that takes the answer and ``timeout`` schedules ``on_timeout``.
+    ``verbatim=True``. The answer continues the waiting task as the person's next message, and
+    the task's model reads it; from a conversation tool the call keeps the question as its
+    output.
     """
 
     question: str
-    tool: FunctionTool | RawFunctionTool | None = None
-    timeout: timedelta | None = None
     verbatim: bool = False
 
 
@@ -346,6 +346,10 @@ ANSWERS_KEY = "lk.answers"
 """``FunctionCall.extra`` of a call the framework made with the person's answer: the call whose
 question it answers."""
 
+TASK_KEY = "lk.task"
+"""``extra`` key on a message or a call a run recorded in a lane: the task it belongs to. A call's
+output belongs to its call's task."""
+
 APPROVAL_KEY = "lk.approval"
 """``FunctionCall.extra`` key on a call of a tool that requires approval: ``asked`` when it
 returned the read-back, ``granted`` when it ran on the person's answer."""
@@ -382,19 +386,26 @@ APPROVAL_ANSWERED = (
 answer alone reads like a call that ran."""
 
 
+def relays_answer(tool: Any) -> bool:
+    """Whether ``tool`` hands the person's answer to its question on to whoever asked, whose own
+    model reads it, as a delegate does: the answer goes to the tool as said, with no model step.
+    Private to the delegate; any other question's answer goes to the task's model."""
+    return bool(getattr(tool, "_relays_answer", False))
+
+
 def _answered_read_backs(items: Sequence[Any]) -> dict[str, str]:
     """The read-backs the person answered, by call id: ``asked`` calls and the text of the
-    person's message after them."""
+    person's next message in the same task (``TASK_KEY``)."""
     from .chat_context import ChatMessage, FunctionCall
 
     answered: dict[str, str] = {}
-    waiting: list[str] = []
+    waiting: dict[str | None, list[str]] = {}
     for item in items:
+        task = item.extra.get(TASK_KEY) if isinstance(item, (ChatMessage, FunctionCall)) else None
         if isinstance(item, FunctionCall) and item.extra.get(APPROVAL_KEY) == "asked":
-            waiting.append(item.call_id)
+            waiting.setdefault(task, []).append(item.call_id)
         elif isinstance(item, ChatMessage) and item.role == "user":
-            answered.update(dict.fromkeys(waiting, item.text_content or ""))
-            waiting.clear()
+            answered.update(dict.fromkeys(waiting.pop(task, []), item.text_content or ""))
     return answered
 
 
@@ -424,11 +435,12 @@ message, never this output."""
 
 
 def approval_granted(items: Sequence[Any], call: Any) -> bool:
-    """Whether ``call`` repeats the latest read-back of its tool, with the same arguments,
-    after the person answered it, and no earlier repeat used that answer.
+    """Whether ``call`` repeats the latest read-back of its tool in its task, with the same
+    arguments, after the person answered it in that task, and no earlier repeat used that answer.
 
-    A reading of the history by the calls' ``APPROVAL_KEY`` marks and the person's messages: a
-    call that asked something else, such as a missing detail, is neither a read-back nor a run."""
+    A reading of the history by the calls' ``APPROVAL_KEY`` and ``TASK_KEY`` marks and the
+    person's messages: a call that asked something else, such as a missing detail, is neither a
+    read-back nor a run."""
     from .chat_context import FunctionCall
 
     def key(c: FunctionCall) -> str:
@@ -438,9 +450,12 @@ def approval_granted(items: Sequence[Any], call: Any) -> bool:
             return c.arguments or ""
 
     answered = _answered_read_backs(items)
+    task = call.extra.get(TASK_KEY)
     asked: str | None = None  # the arguments of the latest answered, unused read-back
     for item in items:
         if not isinstance(item, FunctionCall) or item.name != call.name:
+            continue
+        if item.extra.get(TASK_KEY) != task:
             continue
         if item.call_id == call.call_id:
             break

@@ -134,14 +134,14 @@ class A2ADelegate(Delegate, Toolset):
                 "an expert's card could not be read", extra={"url": self._url, "error": str(e)}
             )
             if self._tool is None:
-                self._tool = function_tool(self._ask, name=name, description=ASK)
+                self._tool = _relaying(function_tool(self._ask, name=name, description=ASK))
             return self
 
         card = client.card
         self._id = card.name if card is not None else self.id
         about = card.description.strip() if card is not None and card.description else ""
         description = f"{about}\n\n{ASK}" if about else ASK
-        self._tool = function_tool(self._ask, name=name, description=description)
+        self._tool = _relaying(function_tool(self._ask, name=name, description=description))
         return self
 
     async def _ask(self, ctx: RunContext, request: str) -> str | InputRequired | ToolResult:
@@ -182,8 +182,8 @@ class A2ADelegate(Delegate, Toolset):
                 lead += 1
             if lead == len(pieces):
                 whole = "\n\n".join(piece for piece, _ in pieces)
-                return InputRequired(whole, tool=self._tool, verbatim=True)
-            asks = InputRequired("\n\n".join(piece for piece, _ in pieces[lead:]), tool=self._tool)
+                return InputRequired(whole, verbatim=True)
+            asks = InputRequired("\n\n".join(piece for piece, _ in pieces[lead:]))
             object.__setattr__(asks, "_said", [piece for piece, _ in pieces[:lead]])
             return asks
         if exact:
@@ -356,6 +356,13 @@ class A2ADelegate(Delegate, Toolset):
         from ..a2a.auth import Credentials
 
         return Credentials(api_key, api_secret).project_token(identity="delegate")
+
+
+def _relaying(tool: FunctionTool) -> FunctionTool:
+    """The delegate's tool: the person's answer to the expert's question comes back to it as
+    said, and the expert's own model reads it."""
+    tool._relays_answer = True  # type: ignore[attr-defined]
+    return tool
 
 
 def _asking_call(ctx: RunContext) -> str | None:
