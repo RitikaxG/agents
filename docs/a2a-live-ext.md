@@ -81,7 +81,7 @@ ignored.
 | `livekit/interruptionReason` | the same event | the server | string: `new-message` |
 | `livekit/mergedInto`         | the final `TaskStatusUpdateEvent` of a `completed` task | the server | string: a task id |
 | `livekit/verbatim`           | the final `TaskStatusUpdateEvent` of a `completed` or `input-required` task | the server | string: the part of the answer or the question that reaches the person exactly as written; it leads the text |
-| `livekit/verbatim`           | a text `Part` of the answer artifact's last chunk | the server | `true`: this part reaches the person exactly as written; the agent facing them words the other parts |
+| `livekit/verbatim`           | a text `Part` of the answer artifact's last chunk, or of an `input-required` task's final status message | the server | `true`: this part reaches the person exactly as written; the agent facing them words the other parts |
 
 ## 5. Server-set keys, sent either way
 
@@ -234,10 +234,12 @@ history from it.
 ## 8. Tasks and the keys together
 
 One message is one task; the task id is the id of the stream a client
-resubscribes to. A message carrying a `taskId` continues that task while it
-is not terminal; a message without one is a new task in the same context,
-and closes a waiting task with `livekit/mergedInto`. Terminal tasks never
-change. A resend of a `messageId` returns the task it made.
+resubscribes to. A message carrying the `taskId` of an `input-required`
+task continues that task, on the same stream, and a message without one is
+a new task in the same context, unless it is the person's (not tagged
+`livekit/kind: delegation`) and a question of the lane is open: it continues
+the oldest one. Terminal tasks never change. A resend of a `messageId`
+returns the task it made, or continued.
 
 `GetTask`, `CancelTask` and `SubscribeToTask` find the thread from
 `contextId` in their params, beside the task `id`. A2A's task methods carry

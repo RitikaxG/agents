@@ -46,6 +46,7 @@ from ..llm import (
 )
 from ..llm.chat_context import _ReadOnlyChatContext
 from ..llm.tool_context import (
+    ANSWERS_KEY,
     ASK_IN_OWN_WORDS,
     DELIVERED,
     Completed,
@@ -383,26 +384,21 @@ class AgentRun(Generic[Run_T]):
             if hooks is not None and hooks.on_item is not None:
                 hooks.on_item(item)
 
-        # what reached the person exactly as written, in order: it leads the answer
-        verbatim: list[str] = []
+        # what this turn told the person beside its tool calls, in order, and whether as
+        # written: it leads the question the turn ends on, and the verbatim parts lead the answer
+        shown: list[tuple[str, bool]] = []
         # a run another agent asked does not phrase: the agent facing the person does
         facing_person = hooks is None or not hooks.delegated
-
-        def composed(text: str | None) -> str | None:
-            if not verbatim:
-                return text
-            return "\n\n".join([*verbatim, *([text] if text else [])])
 
         def finish(
             output: Any, *, input_required: str | None = None, interrupted: bool = False
         ) -> RunResult[Run_T]:
-            if verbatim and (output is None or isinstance(output, str)) and not interrupted:
-                if input_required is not None:
-                    input_required = composed(input_required)
-                else:
+            verbatim = [text for text, exact in shown if exact]
+            if verbatim and input_required is None and not interrupted:
+                if output is None or isinstance(output, str):
                     result._segments = [(text, True) for text in verbatim]
                     result._segments += [(output, False)] if output else []
-                    output = composed(output)
+                    output = "\n\n".join([*verbatim, *([output] if output else [])])
             result._verbatim = "\n\n".join(verbatim) if verbatim else None
             result._run_output = output
             result._input_required = input_required
@@ -415,21 +411,27 @@ class AgentRun(Generic[Run_T]):
 
         async def ask(q: InputRequired, fnc_call: FunctionCall | None) -> RunResult[Run_T]:
             """The turn waits on the person: the question as written when verbatim or when
-            another agent asked, else in the agent's own words."""
+            another agent asked, else in the agent's own words, after what the turn told them
+            already. It is exact as a whole only when every part is."""
+            # what a delegate's expert said as written before its question
+            shown.extend((said, True) for said in getattr(q, "_said", ()))
             text = q.question
             if not q.verbatim and facing_person:
                 text = await self._phrase(chat_ctx, text)
             record(ChatMessage(role="assistant", content=[text]))
             result._pending_call = fnc_call
             result._answer_tool = q.tool.info.name if q.tool else None
-            ended = finish(None, input_required=text)
-            if q.verbatim:
-                result._verbatim = ended.input_required  # the question is exact, as a whole
+            parts = [*shown, (text, q.verbatim)]
+            ended = finish(None, input_required="\n\n".join(piece for piece, _ in parts))
+            result._segments = parts if len(parts) > 1 else None
+            if all(exact for _, exact in parts):
+                result._verbatim = ended.input_required
             return ended
 
         def finish_task_turn(text: str) -> RunResult[Run_T]:
             # a task holds the conversation: every reply of its model waits on the person
-            return finish(None, input_required=text)
+            verbatim = [said for said, exact in shown if exact]
+            return finish(None, input_required="\n\n".join([*verbatim, text]) if verbatim else text)
 
         async def act(
             transition: Transition, fnc_call: FunctionCall | None
@@ -440,7 +442,7 @@ class AgentRun(Generic[Run_T]):
                 # its end is the run's end, with its value or its error as the output
                 if isinstance(transition, Completed):
                     if transition.verbatim:
-                        verbatim.append(_tool_text(transition.value))
+                        shown.append((_tool_text(transition.value), True))
                     self._agent._complete(transition.value)
                     return finish(transition.value)
                 if isinstance(transition, (Failed, Rejected)):
@@ -449,7 +451,7 @@ class AgentRun(Generic[Run_T]):
                     return finish(text)
             if isinstance(transition, Completed):
                 if transition.verbatim:
-                    verbatim.append(_tool_text(transition.value))
+                    shown.append((_tool_text(transition.value), True))
                 self._pop(transition.value, record, verbatim=transition.verbatim)
             elif isinstance(transition, (Failed, Rejected)):
                 text = transition.error if isinstance(transition, Failed) else transition.reason
@@ -508,6 +510,8 @@ class AgentRun(Generic[Run_T]):
 
             if text:
                 record(ChatMessage(role="assistant", content=[text]))
+                if calls:
+                    shown.append((text, False))
 
             if not calls:
                 if isinstance(agent, AgentTask):
@@ -562,7 +566,7 @@ class AgentRun(Generic[Run_T]):
                 said = out.raw_output
                 if isinstance(said, ToolResult) and said.verbatim:
                     # the person gets it as written; the model reads that they did
-                    verbatim.append(_tool_text(said.output))
+                    shown.append((_tool_text(said.output), True))
                     out.fnc_call_out.output = delivered(said).output
                 record(out.fnc_call_out)
                 if isinstance(said, ToolResult) and said.verbatim and not said.reply_required:
@@ -679,7 +683,8 @@ class AgentRun(Generic[Run_T]):
 
     def _answer_call(self, tool_ctx: ToolContext, name: str | None) -> FunctionCall | None:
         """The call that hands this run's message to the tool the last turn's
-        ``InputRequired(tool=)`` named; ``None`` when nothing waits on it."""
+        ``InputRequired(tool=)`` named, marked with the call it answers (``ANSWERS_KEY``);
+        ``None`` when nothing waits on it."""
         if name is None:
             return None
         tool = tool_ctx.get_function_tool(name)
@@ -692,8 +697,20 @@ class AgentRun(Generic[Run_T]):
         arguments = answer_arguments(tool, self._message.text_content or "")
         if arguments is None:
             return None  # no string parameter: the model reads the answer
+        # the call that asked is the tool's latest: the turn ended on it
+        asked = next(
+            (
+                item.call_id
+                for item in reversed(self._chat_ctx.items)
+                if isinstance(item, FunctionCall) and item.name == name
+            ),
+            None,
+        )
         return FunctionCall(
-            name=name, arguments=json.dumps(arguments), call_id=utils.shortuuid("call_")
+            name=name,
+            arguments=json.dumps(arguments),
+            call_id=utils.shortuuid("call_"),
+            extra={ANSWERS_KEY: asked} if asked else {},
         )
 
     async def _execute(

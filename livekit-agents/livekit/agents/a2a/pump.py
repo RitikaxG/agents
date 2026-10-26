@@ -3,7 +3,7 @@
 ``WireHost`` is the host object of a wire turn: it runs the handler and turns the turn's calls
 into the A2A frames of the response. Every frame goes through the ``ResponsePump``: appended to
 the task's stream as it is produced, whether or not a client is still reading, and the stream
-is closed at the terminal frame. The turn runs in a task of its own and emits here; the
+is closed at the terminal frame; a task waiting on a question keeps it for its answer's frames. The turn runs in a task of its own and emits here; the
 response generator relays what has already been made durable. A client that goes away leaves
 that generator suspended, which changes nothing: the turn runs to its commit, and a
 ``tasks/resubscribe`` replays the stream from any offset.
@@ -75,10 +75,12 @@ class ResponsePump(Generic[T]):
         self._streams.append(self._stream_id, record.encode())
         self._queue.put_nowait(event)
 
-    async def finish(self, outcome: T) -> None:
-        """The terminal frame was emitted: close the stream, end the relay."""
+    async def finish(self, outcome: T, *, close: bool = True) -> None:
+        """The last frame was emitted: end the relay, and close the stream unless the task
+        goes on, as one waiting on a question does."""
         self._outcome = outcome
-        await self._close()
+        if close:
+            await self._close()
         self._queue.put_nowait(None)
 
     async def fail(self, error: BaseException) -> None:
@@ -166,7 +168,9 @@ class WireHost(Generic[S]):
         artifacts = record.data.artifacts
         if record.id == self._task_id and artifacts:
             self._pump.emit(self._answer(outcome, str(artifacts[0]["artifactId"])))
-        self._pump.emit(final_event(record, outcome.context_id, exts=self._exts))
+        # a question goes in the pieces the run said it in
+        segments = self._host.segments or ()
+        self._pump.emit(final_event(record, outcome.context_id, exts=self._exts, segments=segments))
         self._mark("doneMs")
         logger.debug("a turn's timing", extra={"taskId": self._task_id, **self._marks})
 

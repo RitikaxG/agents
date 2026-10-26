@@ -377,11 +377,7 @@ def artifact_event(
     """One chunk of the answer artifact; the final chunk sets ``lastChunk``. With ``segments``
     the chunk is one text part per segment, a verbatim one flagged ``livekit/verbatim``."""
     artifact = pb.Artifact(artifact_id=artifact_id, name=ANSWER_ARTIFACT_NAME)
-    for piece, exact in segments:
-        part = pb.Part(text=piece)
-        if exact:
-            part.metadata.CopyFrom(struct(metadata_to_wire({VERBATIM: True})))
-        artifact.parts.append(part)
+    artifact.parts.extend(_segment_parts(segments))
     if not segments and (text or not append):
         artifact.parts.append(pb.Part(text=text))
 
@@ -394,10 +390,23 @@ def artifact_event(
     )
 
 
+def _segment_parts(segments: Sequence[Segment]) -> list[pb.Part]:
+    """One text part per segment, a verbatim one flagged ``livekit/verbatim``."""
+    parts = []
+    for piece, exact in segments:
+        part = pb.Part(text=piece)
+        if exact:
+            part.metadata.CopyFrom(struct(metadata_to_wire({VERBATIM: True})))
+        parts.append(part)
+    return parts
+
+
 def final_event(
-    record: TaskRecord, context_id: str, *, exts: Extensions
+    record: TaskRecord, context_id: str, *, exts: Extensions, segments: Sequence[Segment] = ()
 ) -> pb.TaskStatusUpdateEvent:
-    """The terminal status event, built from the committed row so a replay says the same."""
+    """The terminal status event, built from the committed row so a replay says the same. With
+    ``segments`` that spell the question of an ``input-required`` row, its status message is one
+    text part per segment, a verbatim one flagged."""
     event = pb.TaskStatusUpdateEvent(
         task_id=record.id,
         context_id=context_id,
@@ -411,6 +420,10 @@ def final_event(
     carries_message = record.status != "completed" or not record.data.artifacts
     status_message = _status_message_to_pb(record, context_id, exts) if carries_message else None
     if status_message is not None:
+        question = record.status == "input-required"
+        if question and "\n\n".join(p for p, _ in segments) == _text(status_message.parts):
+            del status_message.parts[:]
+            status_message.parts.extend(_segment_parts(segments))
         event.status.message.CopyFrom(status_message)
 
     metadata = metadata_to_wire(record.data.metadata)
@@ -465,7 +478,7 @@ class TaskUpdate:
     metadata: Metadata = field(default_factory=dict)
     segments: list[Segment] = field(default_factory=list)
     """The answer artifact's text parts in order, a verbatim one flagged; appended chunks
-    continue the part before them."""
+    continue the part before them. Of a question, its status message's parts."""
 
 
 @dataclass
@@ -560,6 +573,21 @@ def _status_update(
             task_id=ids.task_id,
             context_id=ids.context_id,
             metadata=metadata,
+        )
+
+    if state == "input-required" and text:
+        # a question is the status message, whatever text streamed before it
+        parts = [p for p in event.status.message.parts if p.WhichOneof("content") == "text"]
+        return TaskUpdate(
+            state=state,
+            text=text,
+            task_id=ids.task_id,
+            context_id=ids.context_id,
+            metadata=metadata,
+            segments=[
+                (p.text, metadata_from_wire(as_dict(p.metadata)).get(VERBATIM) is True)
+                for p in parts
+            ],
         )
 
     answer_text = answer.text()

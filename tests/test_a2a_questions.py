@@ -256,9 +256,6 @@ async def test_a_delegation_with_no_task_id_is_a_new_task(door: Callable[..., Do
 
 
 @pytest.mark.rule("R35")
-@pytest.mark.xfail(
-    strict=True, reason="R35: the door sends the frames of a new task under the running task's id"
-)
 async def test_a_task_id_of_a_running_task_is_a_new_task(door: Callable[..., Door]) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -313,7 +310,6 @@ async def test_a_task_id_of_an_ended_task_is_refused_but_a_resend_is_answered(
 
 
 @pytest.mark.rule("R35")
-@pytest.mark.xfail(strict=True, reason="R35: the door continues a task of another lane")
 async def test_a_task_id_of_another_lane_is_not_found(
     door: Callable[..., Door], experts: Callable[..., Expert]
 ) -> None:
@@ -447,18 +443,7 @@ async def test_a_non_answer_goes_to_the_experts_model_in_the_same_task(
 
 
 @pytest.mark.rule("R43")
-@pytest.mark.parametrize(
-    "before",
-    [
-        "",
-        pytest.param(
-            "Let me check.",
-            marks=pytest.mark.xfail(
-                strict=True, reason="R43: the question drops the text the turn said before it"
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("before", ["", "Let me check."])
 async def test_a_question_carries_what_the_turn_said_before_it(
     door: Callable[..., Door], before: str
 ) -> None:
@@ -474,10 +459,6 @@ async def test_a_question_carries_what_the_turn_said_before_it(
 
 
 @pytest.mark.rule("R43", "B30")
-@pytest.mark.xfail(
-    strict=True,
-    reason="B30: the delegate reads the streamed text as the question, not the status message",
-)
 async def test_an_experts_question_after_streamed_text_is_its_status_message(
     door: Callable[..., Door], experts: Callable[..., Expert]
 ) -> None:
@@ -500,9 +481,6 @@ async def test_an_experts_question_after_streamed_text_is_its_status_message(
 
 
 @pytest.mark.rule("R43", "B31")
-@pytest.mark.xfail(
-    strict=True, reason="B31: the front desk phrases the verbatim result with the question"
-)
 async def test_a_verbatim_result_before_an_experts_question_reaches_the_person_as_written(
     door: Callable[..., Door], experts: Callable[..., Expert]
 ) -> None:

@@ -126,9 +126,11 @@ token minted from `LIVEKIT_API_KEY` and `LIVEKIT_API_SECRET`, which passes a
 `public=False` endpoint; an expert anywhere else gets none.
 
 An expert that needs the person's answer ends its task `input-required`:
-the question is the delegation's output. The next delegation in the thread, carrying the person's answer, is
-the answer to that question on the expert's lane; the waiting task ends
-`completed`, merged into the new one. The delegate's tool returns the
+the question is the delegation's output, with what the expert said before
+it. The person's answer continues that task: the delegate sends it with the
+task's `taskId`, and the expert's own model reads it, answer or not. The
+pieces the expert flagged `livekit/verbatim` before its question reach the
+person as written, and the rest is the front desk's to word. The delegate's tool returns the
 question as `InputRequired(question, tool=)` naming itself, so the front
 desk asks it in its own words, or as written when the expert flagged it
 `livekit/verbatim`, and what the person says next is sent to the expert as the
