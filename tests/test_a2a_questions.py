@@ -480,3 +480,144 @@ async def test_a_verbatim_result_before_an_experts_question_reaches_the_person_a
     phrased = desk_model.requests[-1].items[-1]
     assert isinstance(phrased, ChatMessage)
     assert "Visits cannot be refunded." not in (phrased.text_content or "")
+
+
+# ---------------------------------------------------------------------------------------------
+# one question per task
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.rule("R45", "B19")
+@pytest.mark.xfail(
+    strict=True,
+    reason="B19: a text run returns at the first asking call, so the next call of the step never runs",
+)
+async def test_the_questions_of_one_step_are_one_and_the_model_reads_the_answer(
+    door: Callable[..., Door],
+) -> None:
+    model = ScriptedLLM(
+        Reply(tool_calls=[call("book", "b1"), call("book", "b2")]),
+        Reply("Both booked.", when=said("ana@example.com")),
+    )
+    desk = door(runs(asking(model)))
+    thread = await desk.thread()
+    asked = await desk.send("book two visits", context_id=thread)
+    assert asked.state == "input_required"
+    assert asked.status_text == QUESTION, "the same question once"
+
+    done = await desk.send("ana@example.com", context_id=thread)
+    assert done.task["id"] == asked.task["id"] and done.answer == "Both booked."
+    # the answer goes to the model, which sees every call that waited on it
+    outputs = {
+        o.call_id: str(o.output)
+        for o in model.requests[-1].items
+        if isinstance(o, FunctionCallOutput)
+    }
+    assert set(outputs) == {"b1", "b2"} and all(QUESTION in o for o in outputs.values())
+
+
+@pytest.mark.rule("R45")
+@pytest.mark.xfail(strict=True, reason="R45: the step's second question is never asked")
+async def test_different_questions_of_one_step_are_asked_in_order_and_exact_only_if_all_are(
+    door: Callable[..., Door],
+) -> None:
+    model = ScriptedLLM(Reply(tool_calls=[call("book", "b1"), call("pick_day", "d1")]))
+    agent = asking(model)
+
+    @agent.tool
+    async def pick_day(ctx: RunContext) -> InputRequired:
+        """Pick the day."""
+        return InputRequired("Which day?")
+
+    desk = door(runs(agent))
+    asked = await desk.send("book a visit", context_id=await desk.thread(), **DELEGATION)
+    assert asked.state == "input_required"
+    assert asked.status_text == f"{QUESTION}\n\nWhich day?"
+    assert asked.metadata.get(VERBATIM) != asked.status_text
+
+
+# ---------------------------------------------------------------------------------------------
+# questions of different tasks on one lane
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.rule("R53", "B20")
+@pytest.mark.xfail(
+    strict=True,
+    reason="B20: another task's message answers the read-back, and its repeat is granted",
+)
+async def test_a_read_back_is_answered_only_by_a_message_of_its_task(
+    door: Callable[..., Door],
+) -> None:
+    ran: list[str] = []
+    model = ScriptedLLM(
+        Reply(tool_calls=[call("cancel", "c1", date="monday")], when=said("cancel monday")),
+        # another task's "yes": the same call there is not approved by it
+        Reply(tool_calls=[call("cancel", "c2", date="monday")], when=said("yes")),
+        Reply(tool_calls=[call("cancel", "c3", date="monday")], when=said("yes")),
+        Reply("Canceled.", when=output_of("c3")),
+    )
+    agent = Agent(instructions="front desk", llm=model)
+
+    @agent.tool(requires_approval=True)
+    async def cancel(ctx: RunContext, date: str) -> str:
+        """Cancel the visit on a date."""
+        ran.append(date)
+        return f"canceled {date}"
+
+    desk = door(runs(agent))
+    thread = await desk.thread()
+    first = await desk.send("cancel monday", context_id=thread)
+    assert first.state == "input_required"
+    read_back = first.status_text
+
+    other = await desk.send("yes", context_id=thread, **DELEGATION)
+    assert other.task["id"] != first.task["id"]
+    assert other.state == "input_required" and other.status_text == read_back
+    assert ran == []
+
+    done = await desk.send("yes", context_id=thread, task_id=first.task["id"])
+    assert done.state == "completed" and done.answer == "Canceled."
+    assert ran == ["monday"], "only the task's own answer approves its repeat"
+
+
+@pytest.mark.rule("R54")
+@pytest.mark.xfail(
+    strict=True, reason="R54: a continued task's model reads the other open task's items"
+)
+async def test_a_continued_task_does_not_read_what_other_open_tasks_added(
+    door: Callable[..., Door],
+) -> None:
+    model = ScriptedLLM(
+        Reply(tool_calls=[call("book", "b1")], when=said("book me in")),
+        Reply(tool_calls=[call("pick_day", "d1")], when=said("move my visit")),
+        Reply("Booked.", when=said("ana@example.com")),
+        Reply("Nothing else is open.", when=said("anything else?")),
+    )
+    agent = asking(model)
+
+    @agent.tool
+    async def pick_day(ctx: RunContext) -> InputRequired:
+        """Pick the day."""
+        return InputRequired("Which day?", verbatim=True)
+
+    desk = door(runs(agent))
+    thread = await desk.thread()
+    booking = await desk.send("book me in", context_id=thread)
+    moving = await desk.send("move my visit", context_id=thread, **DELEGATION)
+    assert booking.state == moving.state == "input_required"
+
+    done = await desk.send("ana@example.com", context_id=thread, task_id=booking.task["id"])
+    assert done.answer == "Booked."
+    continued = model.requests[-1]
+    assert user_texts(continued) == ["book me in", "ana@example.com"]
+    assert not any(
+        "Which day?" in (i.text_content or "")
+        for i in continued.items
+        if isinstance(i, ChatMessage)
+    )
+
+    # a new task reads everything the lane holds
+    fresh = await desk.send("anything else?", context_id=thread, **DELEGATION)
+    assert fresh.answer == "Nothing else is open."
+    assert "move my visit" in user_texts(model.requests[-1])
